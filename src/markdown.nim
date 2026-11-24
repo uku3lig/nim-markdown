@@ -63,7 +63,7 @@
 ## Finally, All Token types support conversion to HTML strings with the special $ proc,
 ##
 
-import re
+import regex
 from strformat import fmt, `&`
 from uri import encodeUrl
 from strutils import join, splitLines, repeat, replace,
@@ -79,7 +79,7 @@ from htmlgen import nil, p, br, em, strong, a, img, code, del, blockquote,
 
 from markdownpkg/entities import htmlEntityToUtf8
 
-var precompiledExp {.threadvar.}: Table[string, re.Regex]
+var precompiledExp {.threadvar.}: Table[string, regex.Regex2]
 
 
 
@@ -282,7 +282,7 @@ proc appendChild*(token: Token, child: Token) =
   else:
     token.children.append(child)
 
-const THEMATIC_BREAK_RE = r" {0,3}([-*_])(?:[ \t]*\1){2,}[ \t]*(?:\n+|$)"
+const THEMATIC_BREAK_RE = r" {0,3}(?:\*(?:[ \t]*\*){2,}|_(?:[ \t]*_){2,}|-(?:[ \t]*-){2,})[ \t]*(?:\n+|$)"
 
 const HTML_SCRIPT_START = r" {0,3}<(script|pre|style)(?=(\s|>|$))"
 const HTML_SCRIPT_END = r"</(script|pre|style)>"
@@ -354,7 +354,7 @@ proc replaceInitialTabs*(doc: string): string =
       add result, substr(line, n, line.len)
 
 proc preProcessing(state: State, token: Token) =
-  token.doc = token.doc.replace(re"\r\n|\r", "\n")
+  token.doc = token.doc.replace(re2"\r\n|\r", "\n")
   token.doc = token.doc.replace("\u2424", " ")
   token.doc = token.doc.replace("\u0000", "\uFFFD")
   token.doc = token.doc.replace("&#0;", "&#XFFFD;")
@@ -362,7 +362,7 @@ proc preProcessing(state: State, token: Token) =
 
 proc isBlank(doc: string, start: int = 0, stop: int = 0): bool =
   let matchStop = if stop == 0: doc.len else: stop
-  doc.matchLen(re"[ \t]*\n?$", start, matchStop) != -1
+  doc[start..<matchStop].match(re2"[ \t]*\n?$")
 
 proc findFirstLine(doc: string, start: int): int =
   if start >= doc.len:
@@ -405,7 +405,7 @@ proc escapeAmpersandChar(doc: string): string =
   ##     check escapeAmpersandChar("&amp;") ==  "&amp;amp;"
   result = doc.replace("&", "&amp;")
 
-let reAmpersandSeq = re"&(?!#?\w+;)"
+let reAmpersandSeq = re2"&(?!#?\w+;)"
 
 proc escapeAmpersandSeq(doc: string): string =
   ## Replace `&` from a sequence of characters starting from it to HTML-safe characters.
@@ -414,7 +414,7 @@ proc escapeAmpersandSeq(doc: string): string =
   ## Example::
   ##     check escapeAmpersandSeq("&") == "&"
   ##     escapeAmpersandSeq("&amp;") == "&amp;"
-  result = doc.replace(sub=reAmpersandSeq, by="&amp;")
+  result = doc.replace(reAmpersandSeq, "&amp;")
 
 proc escapeCode(doc: string): string =
   ## Make code block in markdown document HTML-safe.
@@ -424,23 +424,24 @@ proc removeBlankLines(doc: string): string =
   doc.strip(leading=false, trailing=true, chars={'\n'})
 
 proc escapeInvalidHTMLTag(doc: string): string =
-  doc.replacef(
-    re(r"<(title|textarea|style|xmp|iframe|noembed|noframes|script|plaintext)>",
-      {RegexFlag.reIgnoreCase}),
+  doc.replace(
+    re2(r"<(title|textarea|style|xmp|iframe|noembed|noframes|script|plaintext)>",
+      {regexCaseless}),
     "&lt;$1>")
 
 const IGNORED_HTML_ENTITY = ["&lt;", "&gt;", "&amp;"]
 
 proc escapeHTMLEntity(doc: string): string =
-  var entities = doc.findAll(re"&([^;]+);")
+  var entities = doc.findAll(re2"&([^;]+);")
   result = doc
-  for entity in entities:
+  for m in entities:
+    let entity = doc[m.boundaries]
     if not IGNORED_HTML_ENTITY.contains(entity):
       let utf8Char = entity.htmlEntityToUtf8
       if utf8Char == "":
-        result = result.replace(re(entity), entity.escapeAmpersandChar)
+        result = result.replace(re2(entity), entity.escapeAmpersandChar)
       else:
-        result = result.replace(re(entity), utf8Char)
+        result = result.replace(re2(entity), utf8Char)
 
 proc escapeLinkUrl(url: string): string =
   encodeUrl(url.escapeHTMLEntity, usePlus=false).multiReplace([
@@ -461,13 +462,13 @@ proc escapeLinkUrl(url: string): string =
   ])
 
 proc escapeBackslash(doc: string): string =
-  doc.replacef(re"\\([\\`*{}\[\]()#+\-.!_<>~|""$%&',/:;=?@^])", "$1")
+  doc.replace(re2"\\([\\`*{}\[\]()#+\-.!_<>~|""$%&',/:;=?@^])", "$1")
 
-proc reFmt(patterns: varargs[string]): Regex =
+proc reFmt(patterns: varargs[string]): Regex2 =
   var s: string
   for p in patterns:
     s &= p
-  re(s)
+  re2(s)
 
 method `$`*(token: Token): string {.base.} = ""
 
@@ -629,12 +630,13 @@ proc render*(token: Token, sep = "\n"): string =
     result &= $child
 
 proc endsWithBlankLine(token: Token): bool =
+  var m = RegexMatch2()
   if token of Paragraph:
     Paragraph(token).trailing.len > 1
   elif token of Li:
-    Li(token).verbatim.find(re"\n\n$") != -1
+    Li(token).verbatim.find(re2"\n\n$", m)
   else:
-    token.doc.find(re"\n\n$") != -1
+    token.doc.find(re2"\n\n$", m)
 
 proc parseLoose(token: Token): bool =
   for node in token.children.nodes:
@@ -646,45 +648,43 @@ proc parseLoose(token: Token): bool =
   return false
 
 proc parseOrderedListItem*(doc: string, start=0, marker: var string, listItemDoc: var string, index: var int = 1): int =
-  let markerRegex = re"(?P<leading> {0,3})(?<index>\d{1,9})(?P<marker>\.|\))(?: *$| *\n|(?P<indent> +)([^\n]+(?:\n|$)))"
-  var matches: array[5, string]
+  let markerRegex = re2"(?P<leading> {0,3})(?P<index>\d{1,9})(?P<marker>\.|\))(?: *$| *\n|(?P<indent> +)([^\n]+(?:\n|$)))"
   var pos = start
 
-  var firstLineSize = doc.matchLen(markerRegex, matches, pos)
-  if firstLineSize == -1:
+  var m = RegexMatch2()
+  if not doc.match(markerRegex, m, pos):
     return -1
 
-  pos += firstLineSize
+  pos += m.boundaries.len
 
-  var leading = matches[0]
+  var leading = doc[m.group(0)]
   if marker == "":
-    marker = matches[2]
-  if marker != matches[2]:
+    marker = doc[m.group(2)]
+  if marker != doc[m.group(2)]:
     return -1
 
-  var indexString = matches[1]
+  var indexString = doc[m.group(1)]
   index = indexString.parseInt
 
-  listItemDoc = matches[4]
+  listItemDoc = doc[m.group(4)]
 
   var indent = 1
-  if matches[3].len > 1 and matches[3].len <= 4:
-    indent = matches[3].len
-  elif matches[3].len > 4:
-    listItemDoc = matches[3][1 ..< matches[3].len] & listItemDoc
+  if m.group(3).len > 1 and m.group(3).len <= 4:
+    indent = m.group(3).len
+  elif m.group(3).len > 4:
+    listItemDoc = doc[m.group(3).a+1..<m.group(3).b] & listItemDoc
 
   var padding = indexString.len + marker.len + leading.len + indent
 
   var size = 0
   while pos < doc.len:
-    size = doc.matchLen(re(r"(?:\s*| {" & $padding & r"}([^\n]*))(\n|$)"), matches, pos)
-    if size != -1:
-      listItemDoc &= matches[0]
-      listItemDoc &= matches[1]
-      if listItemDoc.startswith("\n") and matches[0] == "":
+    if doc.match(re2(r"(?:\s*| {" & $padding & r"}([^\n]*))(\n|$)"), m, pos):
+      listItemDoc &= doc[m.group(0)]
+      listItemDoc &= doc[m.group(1)]
+      if listItemDoc.startswith("\n") and doc[m.group(0)] == "":
         pos += size
         break
-    elif listItemDoc.find(re"\n{2,}$") == -1:
+    elif not listItemDoc.find(re2"\n{2,}$", m):
       var firstLineSize = findFirstLine(doc, pos)
       var firstLineEnd = pos + firstLineSize
       if isContinuationText(doc, pos, firstLineEnd):
@@ -701,52 +701,50 @@ proc parseOrderedListItem*(doc: string, start=0, marker: var string, listItemDoc
 
 proc parseUnorderedListItem*(doc: string, start=0, marker: var string, listItemDoc: var string): int =
   #  thematic break takes precedence over list item.
-  if doc.matchLen(re(THEMATIC_BREAK_RE), start) != -1:
+  var m = RegexMatch2()
+  if doc.match(re2(THEMATIC_BREAK_RE), m, start):
     return -1
 
   # OL needs to include <empty> as well.
-  let markerRegex = re"(?P<leading> {0,3})(?P<marker>[*\-+])(?:(?P<empty> *(?:\n|$))|(?<indent>(?: +|\t+))([^\n]+(?:\n|$)))"
-  var matches: array[5, string]
+  let markerRegex = re2"(?P<leading> {0,3})(?P<marker>[*\-+])(?:(?P<empty> *(?:\n|$))|(?P<indent>(?: +|\t+))([^\n]+(?:\n|$)))"
   var pos = start
 
-  var firstLineSize = doc.matchLen(markerRegex, matches, pos)
-  if firstLineSize == -1:
+  if not doc.match(markerRegex, m, pos):
     return -1
 
-  pos += firstLineSize
+  pos += m.boundaries.len
 
-  var leading = matches[0]
+  var leading = doc[m.group(0)]
   if marker == "":
-    marker = matches[1]
-  if marker != matches[1]:
+    marker = doc[m.group(1)]
+  if marker != doc[m.group(1)]:
     return -1
 
-  if matches[2] != "":
+  if doc[m.group(2)] != "":
     listItemDoc = "\n"
   else:
-    listItemDoc = matches[4]
+    listItemDoc = doc[m.group(4)]
 
   var indent = 1
-  if matches[3].contains(re"\t"):
+  if doc[m.group(3)].contains(re2"\t"):
     indent = 1
-    listItemDoc = " ".repeat(matches[3].len * 4 - 2) & listItemDoc
-  elif matches[3].len > 1 and matches[3].len <= 4:
-    indent = matches[3].len
-  elif matches[3].len > 4: # code block indent is still 1.
-    listItemDoc = matches[3][1 ..< matches[3].len] & listItemDoc
+    listItemDoc = " ".repeat(m.group(3).len * 4 - 2) & listItemDoc
+  elif m.group(3).len > 1 and m.group(3).len <= 4:
+    indent = m.group(3).len
+  elif m.group(3).len > 4: # code block indent is still 1.
+    listItemDoc = doc[m.group(3).a+1..<m.group(3).b] & listItemDoc
 
   var padding = marker.len + leading.len + indent
 
   var size = 0
   while pos < doc.len:
-    size = doc.matchLen(re(r"(?:[ \t]*| {" & $padding & r"}([^\n]*))(\n|$)"), matches, pos)
-    if size != -1:
-      listItemDoc &= matches[0]
-      listItemDoc &= matches[1]
-      if listItemDoc.startswith("\n") and matches[0] == "":
+    if doc.match(re2(r"(?:[ \t]*| {" & $padding & r"}([^\n]*))(\n|$)"), m, pos):
+      listItemDoc &= doc[m.group(0)]
+      listItemDoc &= doc[m.group(1)]
+      if listItemDoc.startswith("\n") and doc[m.group(0)] == "":
         pos += size
         break
-    elif listItemDoc.find(re"\n{2,}$") == -1:
+    elif not listItemDoc.find(re2"\n{2,}$", m):
       var firstLineSize = findFirstLine(doc, pos)
       var firstLineEnd = pos + firstLineSize
       if isContinuationText(doc, pos, firstLineEnd):
@@ -829,7 +827,11 @@ method parse*(this: OlParser, doc: string, start: int): ParseResult =
   return ParseResult(token: olToken, pos: pos)
 
 proc getThematicBreak(doc: string, start: int = 0): tuple[size: int] =
-  return (size: doc.matchLen(re(THEMATIC_BREAK_RE), start))
+  var m = RegexMatch2()
+  if doc.match(re2(THEMATIC_BREAK_RE), m, start):
+    return (size: m.boundaries.len)
+  else:
+    return (size: -1)
 
 method parse*(this: ThematicBreakParser, doc: string, start: int): ParseResult =
   let res = doc.getThematicBreak(start)
@@ -840,50 +842,48 @@ method parse*(this: ThematicBreakParser, doc: string, start: int): ParseResult =
   )
 
 proc getFence*(doc: string, start: int = 0): tuple[indent: int, fence: string, size: int] =
-  var matches: array[2, string]
-  let size = doc.matchLen(re"((?: {0,3})?)(`{3,}|~{3,})", matches, start)
-  if size == -1: return (-1, "", -1)
-  return (
-    indent: matches[0].len,
-    fence: substr(doc, start, start+size-1).strip,
-    size: size
-  )
+  var m = RegexMatch2()
+  if doc.match(re2"((?: {0,3})?)(`{3,}|~{3,})", m, start):
+    return (
+      indent: m.group(0).len,
+      fence: substr(doc, start, start+m.boundaries.len-1).strip,
+      size: m.boundaries.len
+    )
+  else: return (-1, "", -1)
 
 proc parseCodeContent*(doc: string, indent: int, fence: string): tuple[code: string, size: int]=
   var closeSize = -1
   var pos = 0
   var codeContent = ""
-  let closeRe = re(r"(?: {0,3})" & fence & $fence[0] & "{0,}( |\t)*(?:$|\n)")
+  let closeRe = re2(r"(?: {0,3})" & fence & $fence[0] & "{0,}( |\t)*(?:$|\n)")
   for line in doc.splitLines(keepEol=true):
-    closeSize = line.matchLen(closeRe)
-    if closeSize != -1:
-      pos += closeSize
+    var m = RegexMatch2()
+    if line.match(closeRe, m):
+      pos += m.boundaries.len
       break
 
     if line != "\n" and line != "":
-      codeContent &= line.replacef(re(r"^ {0," & indent.intToStr & r"}([^\n]*)"), "$1")
+      codeContent &= line.replace(re2(r"^ {0," & indent.intToStr & r"}([^\n]*)"), "$1")
     else:
       codeContent &= line
     pos += line.len
   return (codeContent, pos)
 
 proc parseCodeInfo*(doc: string, start: int = 0): tuple[info: string, size: int] =
-  var matches: array[1, string]
-  let size = doc.matchLen(re"(?: |\t)*([^`\n]*)?(?:\n|$)", matches, start)
-  if size == -1:
+  var m = RegexMatch2()
+  if not doc.match(re2"(?: |\t)*([^`\n]*)?(?:\n|$)", m, start):
     return ("", -1)
-  for item in matches[0].splitWhitespace:
-    return (item, size)
-  return ("", size)
+  for item in doc[m.group(0)].splitWhitespace:
+    return (item, m.boundaries.len)
+  return ("", m.boundaries.len)
 
 proc parseTildeBlockCodeInfo*(doc: string, start: int = 0): tuple[info: string, size: int] =
-  var matches: array[1, string]
-  let size = doc.matchLen(re"(?: |\t)*(.*)?(?:\n|$)", matches, start)
-  if size == -1:
+  var m = RegexMatch2()
+  if not doc.match(re2"(?: |\t)*(.*)?(?:\n|$)", m, start):
     return ("", -1)
-  for item in matches[0].splitWhitespace:
-    return (item, size)
-  return ("", size)
+  for item in doc[m.group(0)].splitWhitespace:
+    return (item, m.boundaries.len)
+  return ("", m.boundaries.len)
 
 method parse*(this: FencedCodeParser, doc: string, start: int): ParseResult =
   var pos = start
@@ -1305,7 +1305,7 @@ proc isBlockquote*(s: string, start: int = 0): bool =
 proc consumeBlockquoteMarker(doc: string): string =
   var r: string
   for line in doc.splitLines(keepEol=true):
-    r = line.replacef(re"^ {0,3}>(.*)", "$1")
+    r = line.replace(re2"^ {0,3}>(.*)", "$1")
     if r.len == 0:
       continue
     case r[0]:
